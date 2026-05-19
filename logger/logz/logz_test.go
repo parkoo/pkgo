@@ -2,11 +2,14 @@ package logz
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/parkoo/pkgo/context/tag"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 func TestWithCtx(t *testing.T) {
@@ -111,4 +114,153 @@ func TestHas_NilContext(t *testing.T) {
 	if tag.Has(nil) { //nolint:staticcheck // intentionally testing nil context safety
 		t.Fatal("Has(nil) should return false")
 	}
+}
+
+// ---------- NewGormLogger tests ----------
+
+// TestNewGormLogger_ReturnsNonNil verifies the constructor produces a valid interface.
+func TestNewGormLogger_ReturnsNonNil(t *testing.T) {
+	gl := NewGormLogger(gormlogger.Info, 200*time.Millisecond)
+	if gl == nil {
+		t.Fatal("expected non-nil gorm logger")
+	}
+}
+
+// TestGormLogger_LogMode returns a new instance with updated level.
+func TestGormLogger_LogMode(t *testing.T) {
+	gl := NewGormLogger(gormlogger.Info, 200*time.Millisecond)
+
+	newGL := gl.LogMode(gormlogger.Silent)
+	if newGL == nil {
+		t.Fatal("LogMode returned nil")
+	}
+
+	// Original should be unchanged (new instance returned).
+	orig := gl.(*gormLogger)
+	updated := newGL.(*gormLogger)
+	if orig.level == updated.level {
+		t.Error("LogMode should return a new instance with different level")
+	}
+	if updated.level != gormlogger.Silent {
+		t.Errorf("expected level Silent(%d), got %d", gormlogger.Silent, updated.level)
+	}
+	// slowThreshold should be preserved.
+	if updated.slowThreshold != 200*time.Millisecond {
+		t.Errorf("expected slowThreshold preserved, got %v", updated.slowThreshold)
+	}
+}
+
+// TestGormLogger_Info does not panic and respects level filtering.
+func TestGormLogger_Info(t *testing.T) {
+	ctx := contextWithTags("trace-id", "gorm-info-test")
+
+	// Level=Info should log.
+	gl := NewGormLogger(gormlogger.Info, 200*time.Millisecond)
+	gl.Info(ctx, "info message: %s", "hello")
+
+	// Level=Warn (lower verbosity) should suppress Info messages — no panic.
+	gl2 := NewGormLogger(gormlogger.Warn, 200*time.Millisecond)
+	gl2.Info(ctx, "this should be suppressed")
+}
+
+// TestGormLogger_Warn does not panic and respects level filtering.
+func TestGormLogger_Warn(t *testing.T) {
+	ctx := contextWithTags("trace-id", "gorm-warn-test")
+
+	gl := NewGormLogger(gormlogger.Warn, 200*time.Millisecond)
+	gl.Warn(ctx, "warn message: %s", "slow query")
+
+	// Level=Error should suppress Warn.
+	gl2 := NewGormLogger(gormlogger.Error, 200*time.Millisecond)
+	gl2.Warn(ctx, "this should be suppressed")
+}
+
+// TestGormLogger_Error does not panic and respects level filtering.
+func TestGormLogger_Error(t *testing.T) {
+	ctx := contextWithTags("trace-id", "gorm-error-test")
+
+	gl := NewGormLogger(gormlogger.Error, 200*time.Millisecond)
+	gl.Error(ctx, "error message: %v", errors.New("db connection lost"))
+
+	// Level=Silent should suppress everything.
+	gl2 := NewGormLogger(gormlogger.Silent, 200*time.Millisecond)
+	gl2.Error(ctx, "this should be suppressed")
+}
+
+// TestGormLogger_Trace_WithError logs error trace when an error is provided.
+func TestGormLogger_Trace_WithError(t *testing.T) {
+	ctx := contextWithTags("trace-id", "gorm-trace-err")
+	gl := NewGormLogger(gormlogger.Info, 200*time.Millisecond)
+
+	begin := time.Now().Add(-50 * time.Millisecond) // simulate 50ms elapsed
+	fc := func() (string, int64) {
+		return "SELECT * FROM user WHERE id = 1", 1
+	}
+
+	// Should not panic; logs as error trace.
+	gl.Trace(ctx, begin, fc, errors.New("record not found"))
+}
+
+// TestGormLogger_Trace_SlowQuery logs slow trace when elapsed exceeds threshold.
+func TestGormLogger_Trace_SlowQuery(t *testing.T) {
+	ctx := contextWithTags("trace-id", "gorm-trace-slow")
+	gl := NewGormLogger(gormlogger.Warn, 100*time.Millisecond)
+
+	begin := time.Now().Add(-500 * time.Millisecond) // simulate 500ms (exceeds 100ms threshold)
+	fc := func() (string, int64) {
+		return "SELECT * FROM order WHERE user_id = 42", 10
+	}
+
+	// Should not panic; logs as slow query.
+	gl.Trace(ctx, begin, fc, nil)
+}
+
+// TestGormLogger_Trace_NormalQuery logs info trace for normal queries.
+func TestGormLogger_Trace_NormalQuery(t *testing.T) {
+	ctx := contextWithTags("trace-id", "gorm-trace-normal")
+	gl := NewGormLogger(gormlogger.Info, 200*time.Millisecond)
+
+	begin := time.Now().Add(-5 * time.Millisecond) // simulate 5ms (fast)
+	fc := func() (string, int64) {
+		return "INSERT INTO user(name) VALUES('test')", 1
+	}
+
+	// Should not panic; logs as normal info trace.
+	gl.Trace(ctx, begin, fc, nil)
+}
+
+// TestGormLogger_Trace_Silent suppresses all trace output.
+func TestGormLogger_Trace_Silent(t *testing.T) {
+	ctx := contextWithTags("trace-id", "gorm-trace-silent")
+	gl := NewGormLogger(gormlogger.Silent, 200*time.Millisecond)
+
+	begin := time.Now().Add(-500 * time.Millisecond)
+	fc := func() (string, int64) {
+		return "DELETE FROM user WHERE id = 99", 1
+	}
+
+	// Silent level should skip all trace logic — no panic.
+	gl.Trace(ctx, begin, fc, errors.New("some error"))
+}
+
+// TestGormLogger_Trace_ZeroThreshold disables slow-query detection when threshold is 0.
+func TestGormLogger_Trace_ZeroThreshold(t *testing.T) {
+	ctx := contextWithTags("trace-id", "gorm-trace-zero-threshold")
+	gl := NewGormLogger(gormlogger.Info, 0) // threshold=0 disables slow detection
+
+	begin := time.Now().Add(-10 * time.Second) // very slow, but threshold is 0
+	fc := func() (string, int64) {
+		return "SELECT 1", 0
+	}
+
+	// Should log as normal info trace (not slow), no panic.
+	gl.Trace(ctx, begin, fc, nil)
+}
+
+// contextWithTags is a test helper that creates a context with pre-set tags.
+func contextWithTags(key string, value interface{}) context.Context {
+	ctx := context.Background()
+	ts := tag.NewTags()
+	ts.Set(key, value)
+	return tag.SetInContext(ctx, ts)
 }

@@ -1,6 +1,6 @@
 // Package limiter provides HTTP rate-limiting middleware for go-zero,
 // backed by an in-memory token bucket (ulule/limiter).
-package limiter
+package limiterz
 
 import (
 	"context"

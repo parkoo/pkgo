@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/ulule/limiter/v3 v3.11.2
 	github.com/zeromicro/go-zero v1.10.1
+	gorm.io/gorm v1.31.1
 )
 
 require (
